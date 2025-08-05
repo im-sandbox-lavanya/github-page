@@ -1,6 +1,6 @@
 name: Advanced CI with Caching
 
-on:
+"on":
   push:
     branches: [ main, develop ]
   pull_request:
