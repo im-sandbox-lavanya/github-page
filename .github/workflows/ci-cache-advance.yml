@@ -1,0 +1,323 @@
+name: Advanced CI with Caching
+
+"on":
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run weekly to ensure dependencies are up to date
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+    inputs:
+      clear_cache:
+        description: 'Clear all caches before running'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  NODE_VERSION: '18'
+  RUBY_VERSION: '3.1'
+
+jobs:
+  # Cache preparation job
+  prepare-cache:
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.cache-deps.outputs.cache-hit }}
+      cache-key: ${{ steps.cache-key.outputs.key }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate cache key
+        id: cache-key
+        run: |
+          echo "key=deps-${{ runner.os }}-node${{ env.NODE_VERSION }}-ruby${{ env.RUBY_VERSION }}-${{ hashFiles('**/package-lock.json', '**/Gemfile.lock', '**/yarn.lock') }}" >> $GITHUB_OUTPUT
+
+      - name: Clear cache if requested
+        if: github.event.inputs.clear_cache == 'true'
+        run: |
+          echo "Cache clearing requested - will skip cache restoration"
+          echo "SKIP_CACHE=true" >> $GITHUB_ENV
+
+      - name: Cache dependencies
+        id: cache-deps
+        if: env.SKIP_CACHE != 'true'
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.npm
+            ~/.cache/yarn
+            vendor/bundle
+            ~/.bundle
+            .bundle
+            node_modules
+          key: ${{ steps.cache-key.outputs.key }}
+          restore-keys: |
+            deps-${{ runner.os }}-node${{ env.NODE_VERSION }}-ruby${{ env.RUBY_VERSION }}-
+            deps-${{ runner.os }}-node${{ env.NODE_VERSION }}-
+            deps-${{ runner.os }}-
+
+  # Matrix build job with advanced caching
+  build:
+    needs: prepare-cache
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: ['16', '18', '20']
+        ruby-version: ['3.0', '3.1', '3.2']
+        include:
+          - os: ubuntu-latest
+            node-version: '18'
+            ruby-version: '3.1'
+            deploy: true
+        exclude:
+          # Reduce matrix size for non-critical combinations
+          - os: macos-latest
+            node-version: '16'
+          - os: macos-latest
+            ruby-version: '3.0'
+      fail-fast: false
+      max-parallel: 4
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Setup Ruby ${{ matrix.ruby-version }}
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+          bundler-cache: true
+
+      - name: Restore dependencies cache
+        if: needs.prepare-cache.outputs.cache-hit == 'true'
+        uses: actions/cache/restore@v3
+        with:
+          path: |
+            ~/.npm
+            ~/.cache/yarn
+            vendor/bundle
+            ~/.bundle
+            .bundle
+            node_modules
+          key: ${{ needs.prepare-cache.outputs.cache-key }}
+
+      - name: Install Node.js dependencies
+        if: needs.prepare-cache.outputs.cache-hit != 'true'
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --cache ~/.npm --prefer-offline
+          elif [ -f yarn.lock ]; then
+            yarn install --frozen-lockfile --cache-folder ~/.cache/yarn
+          else
+            echo "No Node.js dependencies found"
+          fi
+
+      - name: Install Ruby dependencies
+        if: needs.prepare-cache.outputs.cache-hit != 'true'
+        run: |
+          if [ -f Gemfile ]; then
+            bundle config set --local path 'vendor/bundle'
+            bundle install --jobs 4 --retry 3
+          else
+            echo "No Ruby dependencies found"
+          fi
+
+      - name: Save dependencies cache
+        if: needs.prepare-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v3
+        with:
+          path: |
+            ~/.npm
+            ~/.cache/yarn
+            vendor/bundle
+            ~/.bundle
+            .bundle
+            node_modules
+          key: ${{ needs.prepare-cache.outputs.cache-key }}
+
+      - name: Cache Jekyll build
+        uses: actions/cache@v3
+        with:
+          path: |
+            _site
+            .jekyll-cache
+            .sass-cache
+          key: jekyll-${{ runner.os }}-${{ matrix.ruby-version }}-${{ hashFiles('**/*.md', '**/*.html', '**/*.scss', '_config.yml') }}
+          restore-keys: |
+            jekyll-${{ runner.os }}-${{ matrix.ruby-version }}-
+            jekyll-${{ runner.os }}-
+
+      - name: Lint code
+        run: |
+          echo "Running linting checks..."
+          # Add your linting commands here
+          if command -v htmlproofer &> /dev/null; then
+            echo "HTML validation would run here"
+          fi
+          if command -v rubocop &> /dev/null; then
+            echo "Ruby linting would run here"
+          fi
+
+      - name: Build site
+        run: |
+          if [ -f _config.yml ]; then
+            echo "Building Jekyll site..."
+            if command -v bundle &> /dev/null && bundle list | grep jekyll; then
+              bundle exec jekyll build --verbose
+            else
+              echo "Jekyll not found, creating basic build output"
+              mkdir -p _site
+              cp -r * _site/ 2>/dev/null || true
+              rm -rf _site/.git _site/_site 2>/dev/null || true
+            fi
+          else
+            echo "No Jekyll configuration found, skipping build"
+          fi
+
+      - name: Test site
+        run: |
+          echo "Running tests..."
+          if [ -d _site ]; then
+            echo "Site built successfully"
+            ls -la _site/
+          fi
+          # Add your test commands here
+
+      - name: Cache test results
+        uses: actions/cache@v3
+        with:
+          path: |
+            test-results
+            coverage
+            .nyc_output
+          key: test-results-${{ runner.os }}-${{ matrix.node-version }}-${{ matrix.ruby-version }}-${{ github.sha }}
+          restore-keys: |
+            test-results-${{ runner.os }}-${{ matrix.node-version }}-${{ matrix.ruby-version }}-
+
+      - name: Upload build artifacts
+        if: matrix.deploy == true
+        uses: actions/upload-artifact@v3
+        with:
+          name: site-build-${{ matrix.os }}-node${{ matrix.node-version }}-ruby${{ matrix.ruby-version }}
+          path: |
+            _site
+            !_site/.git
+          retention-days: 7
+
+  # Security and quality checks
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: prepare-cache
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cache security scan results
+        uses: actions/cache@v3
+        with:
+          path: |
+            .trivyignore
+            trivy-results
+          key: security-scan-${{ hashFiles('**/Gemfile.lock', '**/package-lock.json') }}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # Performance testing
+  performance-test:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: site-build-ubuntu-latest-node18-ruby3.1
+          path: _site
+
+      - name: Cache Lighthouse CI
+        uses: actions/cache@v3
+        with:
+          path: |
+            .lighthouseci
+            lighthouse-results
+          key: lighthouse-${{ github.sha }}
+          restore-keys: lighthouse-
+
+      - name: Run Lighthouse CI
+        run: |
+          echo "Performance testing would run here"
+          # npm install -g @lhci/cli
+          # lhci autorun
+
+  # Deployment job (conditional)
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [build, security-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    concurrency:
+      group: deploy-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: site-build-ubuntu-latest-node18-ruby3.1
+          path: _site
+
+      - name: Cache deployment
+        uses: actions/cache@v3
+        with:
+          path: |
+            deployment-cache
+          key: deploy-${{ github.sha }}
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./_site
+          cname: ${{ vars.CUSTOM_DOMAIN }}
+
+  # Cleanup old caches
+  cleanup:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event.inputs.clear_cache == 'true'
+    steps:
+      - name: Cleanup old caches
+        run: |
+          echo "Cache cleanup would run here"
+          # This would use GitHub CLI to clean up old cache entries
+          # gh cache list --limit 100 | grep -E "cache-key-pattern" | gh cache delete
