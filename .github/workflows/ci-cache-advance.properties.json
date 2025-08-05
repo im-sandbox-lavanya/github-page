@@ -1,0 +1,21 @@
+{
+  "name": "Advanced CI with Caching",
+  "description": "A comprehensive CI workflow template with advanced caching strategies, matrix builds, security scanning, and automated deployment",
+  "categories": [
+    "continuous-integration",
+    "deployment",
+    "testing",
+    "jekyll",
+    "github-pages"
+  ],
+  "iconName": "rocket",
+  "filePatterns": [
+    "**/*.md",
+    "**/*.yml",
+    "**/*.yaml",
+    "**/*.html",
+    "**/Gemfile*",
+    "**/package*.json",
+    "**/_config.yml"
+  ]
+}
